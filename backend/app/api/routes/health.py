@@ -3,8 +3,8 @@ from __future__ import annotations
 
 from fastapi import APIRouter
 
-from app.core.config import settings
-from app.schemas.chat import HealthResponse
+from ...core.config import settings
+from ...schemas.chat import HealthResponse
 
 router = APIRouter()
 

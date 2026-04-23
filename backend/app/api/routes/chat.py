@@ -4,8 +4,8 @@ from __future__ import annotations
 from fastapi import APIRouter
 from fastapi.responses import StreamingResponse
 
-from app.schemas.chat import ChatRequest
-from app.services.chat import stream_chat
+from ...schemas.chat import ChatRequest
+from ...services.chat import stream_chat
 
 router = APIRouter()
 

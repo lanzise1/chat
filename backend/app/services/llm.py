@@ -3,11 +3,12 @@ from __future__ import annotations
 
 from typing import List
 
+import httpx
 from langchain_core.messages import AIMessage, BaseMessage, HumanMessage, SystemMessage
 from langchain_openai import ChatOpenAI
 
-from app.core.config import settings
-from app.schemas.chat import ChatMessage
+from ..core.config import settings
+from ..schemas.chat import ChatMessage
 
 
 def build_llm() -> ChatOpenAI:
@@ -22,6 +23,13 @@ def build_llm() -> ChatOpenAI:
         base_url=settings.openai_base_url,
         temperature=settings.temperature,
         streaming=True,
+        timeout=httpx.Timeout(
+            connect=settings.llm_connect_timeout,
+            read=settings.llm_read_timeout,
+            write=10.0,
+            pool=5.0,
+        ),
+        max_retries=0,
     )
 
 

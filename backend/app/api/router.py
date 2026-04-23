@@ -3,7 +3,7 @@ from __future__ import annotations
 
 from fastapi import APIRouter
 
-from app.api.routes import chat, health
+from .routes import chat, health
 
 api_router = APIRouter()
 api_router.include_router(health.router, tags=["health"])

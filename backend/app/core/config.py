@@ -21,6 +21,13 @@ class Settings:
     openai_model: str = os.getenv("OPENAI_MODEL", "gpt-4o-mini")
     temperature: float = float(os.getenv("OPENAI_TEMPERATURE", "0.7"))
 
+    llm_connect_timeout: float = float(os.getenv("LLM_CONNECT_TIMEOUT", "5"))
+    llm_read_timeout: float = float(os.getenv("LLM_READ_TIMEOUT", "60"))
+    first_token_timeout: float = float(os.getenv("FIRST_TOKEN_TIMEOUT", "20"))
+    chunk_timeout: float = float(os.getenv("CHUNK_TIMEOUT", "30"))
+    llm_max_attempts: int = int(os.getenv("LLM_MAX_ATTEMPTS", "3"))
+    llm_retry_base_delay: float = float(os.getenv("LLM_RETRY_BASE_DELAY", "1"))
+
     host: str = os.getenv("HOST", "0.0.0.0")
     port: int = int(os.getenv("PORT", "8000"))
 
