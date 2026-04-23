@@ -28,6 +28,10 @@ class Settings:
     llm_max_attempts: int = int(os.getenv("LLM_MAX_ATTEMPTS", "3"))
     llm_retry_base_delay: float = float(os.getenv("LLM_RETRY_BASE_DELAY", "1"))
 
+    mcp_enabled: bool = os.getenv("MCP_ENABLED", "true").lower() in ("1", "true", "yes")
+    mcp_server_url: str = os.getenv("MCP_SERVER_URL", "http://localhost:8765/mcp/")
+    mcp_max_tool_iterations: int = int(os.getenv("MCP_MAX_TOOL_ITERATIONS", "6"))
+
     host: str = os.getenv("HOST", "0.0.0.0")
     port: int = int(os.getenv("PORT", "8000"))
 
