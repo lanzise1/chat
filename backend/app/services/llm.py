@@ -1,9 +1,8 @@
-"""LangChain LLM construction and message conversion."""
+"""LangChain LLM construction and message conversion for the LangGraph agent."""
 from __future__ import annotations
 
 from typing import List
 
-import httpx
 from langchain_core.messages import AIMessage, BaseMessage, HumanMessage, SystemMessage
 from langchain_openai import ChatOpenAI
 
@@ -17,25 +16,27 @@ def build_llm() -> ChatOpenAI:
             "OPENAI_API_KEY is not set. Copy .env.example to .env and fill it in."
         )
 
+
     return ChatOpenAI(
         model=settings.openai_model,
         api_key=settings.openai_api_key,
         base_url=settings.openai_base_url,
         temperature=settings.temperature,
         streaming=True,
-        timeout=httpx.Timeout(
-            connect=settings.llm_connect_timeout,
-            read=settings.llm_read_timeout,
-            write=10.0,
-            pool=5.0,
-        ),
-        max_retries=0,
+        # The gateway doesn't echo usage info, so disabling this avoids a
+        # `None + None` TypeError when langchain-openai tries to aggregate
+        # token usage across streamed chunks.
+        stream_usage=False,
     )
 
 
 def to_lc_messages(messages: List[ChatMessage]) -> List[BaseMessage]:
-    """Convert API ChatMessage list into LangChain messages, prepending the system prompt."""
-    lc: List[BaseMessage] = [SystemMessage(content=settings.system_prompt)]
+    """Convert API ChatMessage list into LangChain messages.
+
+    The system prompt is supplied to the agent via `create_agent(prompt=...)`,
+    so it is *not* prepended here.
+    """
+    lc: List[BaseMessage] = []
     for m in messages:
         if m.role == "user":
             lc.append(HumanMessage(content=m.content))

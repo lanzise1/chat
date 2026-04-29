@@ -19,7 +19,7 @@ _SSE_HEADERS = {
 @router.post("/chat")
 async def chat(req: ChatRequest) -> StreamingResponse:
     return StreamingResponse(
-        stream_chat(req.messages),
+        stream_chat(req.messages, thread_id=req.thread_id),
         media_type="text/event-stream",
         headers=_SSE_HEADERS,
     )

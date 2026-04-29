@@ -1,31 +1,33 @@
-"""Chat streaming service — produces SSE chunks from a LangChain stream.
+"""Chat streaming service — drives a LangGraph agent and emits SSE.
 
-Supports MCP tool calling:
-  - tools are discovered once from the configured MCP server
-  - `llm.bind_tools(tools)` lets the model emit tool_calls mid-stream
-  - after each streamed turn we inspect tool_calls, invoke them via MCP,
-    append ToolMessage results, and let the model continue up to
-    MCP_MAX_TOOL_ITERATIONS rounds
+The wire protocol is unchanged from the previous LangChain implementation so
+the frontend doesn't need to be touched:
+    - {"type": "delta",       "content": "..."}            assistant tokens
+    - {"type": "tool_call",   "id", "name", "args"}        model requested a tool
+    - {"type": "tool_result", "id", "name", "content"}     tool returned
+    - {"type": "done"}                                     end of stream
+    - {"type": "error",       "message", "retryable"}      fatal failure
+
+Tool execution and the multi-turn loop now live inside the LangGraph agent;
+this module just translates `astream_events(v2)` into our SSE shape.
 """
 from __future__ import annotations
 
-import asyncio
 import json
 from typing import Any, AsyncIterator, List
+from uuid import uuid4
 
-from langchain_core.messages import AIMessageChunk, ToolMessage
+from langchain_core.messages import AIMessageChunk
 
-from ..core.config import settings
 from ..core.errors import is_retryable
 from ..schemas.chat import ChatMessage
 from ..utils.sse import sse_event
-from .llm import build_llm, to_lc_messages
-from .mcp_client import get_mcp_tools
-from .retry import open_stream_with_retry
+from .graph import get_agent
+from .llm import to_lc_messages
 
 
 def _coerce_delta(delta: object) -> str:
-    """Normalize LangChain chunk content to a plain string."""
+    """Normalize a chunk's content field into a plain string."""
     if isinstance(delta, str):
         return delta
     if isinstance(delta, list):
@@ -38,96 +40,109 @@ def _coerce_delta(delta: object) -> str:
 def _stringify_tool_result(result: object) -> str:
     if isinstance(result, str):
         return result
+    if hasattr(result, "content"):
+        inner = result.content
+        if isinstance(inner, str):
+            return inner
+        result = inner
     try:
         return json.dumps(result, ensure_ascii=False, default=str)
     except Exception:  # noqa: BLE001
         return str(result)
 
 
-async def stream_chat(messages: List[ChatMessage]) -> AsyncIterator[str]:
-    """Yield SSE-formatted events for a chat completion stream."""
-    stream: AsyncIterator[Any] | None = None
+async def stream_chat(
+    messages: List[ChatMessage],
+    thread_id: str | None = None,
+) -> AsyncIterator[str]:
+    """Yield SSE-formatted events for a chat completion stream.
+
+    When `thread_id` is provided, server-side memory is engaged: the agent
+    loads prior turns from the LangGraph checkpointer and only the trailing
+    user message is forwarded. Without `thread_id` the call is stateless and
+    the full message list is replayed each time.
+    """
     try:
-        base_llm = build_llm()
-        tools = await get_mcp_tools()
-        tools_by_name = {t.name: t for t in tools}
-        llm = base_llm.bind_tools(tools) if tools else base_llm
+        agent = await get_agent()
 
-        lc_msgs = to_lc_messages(messages)
+        if thread_id:
+            # Pass only the last message — earlier turns live in the
+            # checkpointer keyed by thread_id.
+            tail = messages[-1:] if messages else []
+            lc_msgs = to_lc_messages(tail)
+            effective_thread_id = thread_id
+        else:
+            # Checkpointer-backed agents require a thread_id on every invoke.
+            # Mint a one-shot uuid so the call is effectively stateless: the
+            # full history is replayed and nothing prior can be loaded.
+            lc_msgs = to_lc_messages(messages)
+            effective_thread_id = f"stateless-{uuid4()}"
 
-        max_iterations = max(1, settings.mcp_max_tool_iterations)
-        for iteration in range(max_iterations):
-            chunks: list[AIMessageChunk] = []
+        invoke_config: dict[str, Any] = {
+            "configurable": {"thread_id": effective_thread_id}
+        }
 
-            if iteration == 0:
-                first, stream = await open_stream_with_retry(llm, lc_msgs)
-                chunks.append(first)
-                text = _coerce_delta(first.content)
+        # tool_call events arrive both as accumulating fields on AIMessageChunk
+        # and as on_tool_start events; dedupe by id so we never emit twice.
+        emitted_tool_calls: set[str] = set()
+
+        async for event in agent.astream_events(
+            {"messages": lc_msgs},
+            config=invoke_config,
+            version="v2",
+        ):
+            kind = event.get("event")
+            data = event.get("data") or {}
+
+            if kind == "on_chat_model_stream":
+                chunk: Any = data.get("chunk")
+                if chunk is None:
+                    continue
+
+                text = _coerce_delta(getattr(chunk, "content", ""))
                 if text:
                     yield sse_event({"type": "delta", "content": text})
-            else:
-                stream = llm.astream(lc_msgs)
 
-            while True:
-                try:
-                    chunk = await asyncio.wait_for(
-                        stream.__anext__(),
-                        timeout=settings.chunk_timeout,
+                if isinstance(chunk, AIMessageChunk):
+                    for tc in getattr(chunk, "tool_calls", None) or []:
+                        tc_id = tc.get("id") or ""
+                        if not tc_id or tc_id in emitted_tool_calls:
+                            continue
+                        emitted_tool_calls.add(tc_id)
+                        yield sse_event(
+                            {
+                                "type": "tool_call",
+                                "id": tc_id,
+                                "name": tc.get("name") or "",
+                                "args": tc.get("args") or {},
+                            }
+                        )
+
+            elif kind == "on_tool_start":
+                tc_id = event.get("run_id") or ""
+                name = event.get("name") or ""
+                args = data.get("input") or {}
+                if tc_id and tc_id not in emitted_tool_calls:
+                    emitted_tool_calls.add(tc_id)
+                    yield sse_event(
+                        {
+                            "type": "tool_call",
+                            "id": tc_id,
+                            "name": name,
+                            "args": args,
+                        }
                     )
-                except StopAsyncIteration:
-                    break
-                chunks.append(chunk)
-                text = _coerce_delta(chunk.content)
-                if text:
-                    yield sse_event({"type": "delta", "content": text})
 
-            try:
-                await stream.aclose()
-            except Exception:  # noqa: BLE001
-                pass
-            stream = None
-
-            if not chunks:
-                break
-
-            agg: AIMessageChunk = chunks[0]
-            for c in chunks[1:]:
-                agg = agg + c
-
-            tool_calls = list(getattr(agg, "tool_calls", None) or [])
-            if not tool_calls:
-                break
-
-            lc_msgs.append(agg)
-            for tc in tool_calls:
-                name = tc.get("name") or ""
-                args = tc.get("args") or {}
-                tc_id = tc.get("id") or ""
-
-                yield sse_event(
-                    {"type": "tool_call", "id": tc_id, "name": name, "args": args}
-                )
-
-                tool = tools_by_name.get(name)
-                if tool is None:
-                    result_text = f"Tool {name!r} is not available."
-                else:
-                    try:
-                        result = await tool.ainvoke(args)
-                        result_text = _stringify_tool_result(result)
-                    except Exception as e:  # noqa: BLE001
-                        result_text = f"Tool {name!r} raised: {e}"
-
+            elif kind == "on_tool_end":
+                tc_id = event.get("run_id") or ""
+                name = event.get("name") or ""
                 yield sse_event(
                     {
                         "type": "tool_result",
                         "id": tc_id,
                         "name": name,
-                        "content": result_text,
+                        "content": _stringify_tool_result(data.get("output")),
                     }
-                )
-                lc_msgs.append(
-                    ToolMessage(content=result_text, tool_call_id=tc_id, name=name)
                 )
 
         yield sse_event({"type": "done"})
@@ -139,9 +154,3 @@ async def stream_chat(messages: List[ChatMessage]) -> AsyncIterator[str]:
                 "retryable": is_retryable(e),
             }
         )
-    finally:
-        if stream is not None:
-            try:
-                await stream.aclose()
-            except Exception:  # noqa: BLE001
-                pass
